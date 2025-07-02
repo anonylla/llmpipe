@@ -1,3 +1,4 @@
+from collections import Counter
 import dataclasses
 import dataclasses_json
 import json
@@ -553,10 +554,42 @@ class LlmProvider:
         all_pipelines: list[LlmReturnFullPipe] = [LlmReturnFullPipe.from_dict(obj) for obj in objs]
         return all_pipelines
 
+    def count_patterns(self, best_pipes: list[list[int]]):
+        counter = {2: Counter(), 3: Counter(), 4: Counter()}
+        for pipe in best_pipes:
+            opid_list = pipe
+            for window_size in [2, 3, 4]:
+                for i in range(len(opid_list) - window_size + 1):
+                    pattern = tuple(opid_list[i:i+window_size])
+                    counter[window_size][pattern] += 1
+        return counter
+    
+    def get_rules_from_patterns(self, pattern_counters: dict[int, Counter], current_pipe: list[int]):
+        rules = []
+        for window_size, counter in pattern_counters.items():
+            for pattern, count in counter.most_common(3):
+                if len(current_pipe) == 0:
+                    continue
+                if pattern[0] != current_pipe[-1]:
+                    continue
+                rules.append((pattern, count))
+        return rules
+    
+    def rules_to_prompt(self, rules: list[tuple[tuple[int], int]]):
+        rules_str = ''
+        if len(rules) > 0:
+            rules_str = 'For more context, we have extracted some frequent patterns and rules that may introduce improvements in the pipeline.\n'
+            for i, (pattern, cnt) in enumerate(rules):
+                rules_str += f'Rule {i + 1}, used {cnt} times: ('
+                rules_str += ', '.join([f'{opid} {QActionProvider.get(opid).get_name()}' for opid in pattern])
+                rules_str = rules_str[:-2] + ')\n'
+        return rules_str
+
     def get_multiple_pipelines_with_experience(self,
                                             dataset_description: str,
                                             last_episode_records: list[PipeRecord],
-                                            experience: list[Document]=[]):
+                                            experience: list[Document]=[],
+                                            exp_cnt=3):
         prompt_template = textwrap.dedent(
         '''
         You are an expert Data Preparation Pipeline Strategist integrated into LLaPipe, 
@@ -626,11 +659,10 @@ class LlmProvider:
 
         recent_pipelines = '\n'.join(recent_pipelines)
 
-        # 添加较好的经验（暂时先只放3个）
         experience_str = ''
         if experience is not None and len(experience) > 0:
             experience_str = '5.  Experience (E), some of the pipelines with high performance: \n'
-            for i, doc in enumerate(experience[:3]):
+            for i, doc in enumerate(experience[:exp_cnt]):
                 dataset_desc = doc.page_content
                 metadata: dict[str, int | float | str] = doc.metadata
                 if metadata['type'].startswith('act'):
